@@ -214,6 +214,8 @@ pub async fn login_with_scrappey(
                 "cmd": "request.get",
                 "url": login_page_url,
                 "session": session_id,
+                "profileId": crate::scrappey::PROFILE_ID,
+                "proxyCountry": "FR",
                 "browserActions": [
                     {
                         "type": "type",

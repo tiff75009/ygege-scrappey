@@ -1,11 +1,9 @@
 pub(crate) use crate::categories::CATEGORIES_CACHE;
 use crate::parser::Torrent;
 use crate::rate_limiter::RateLimiter;
-use crate::scrappey::fetch_ygg_page;
-use crate::{DOMAIN, parser};
 use std::str::FromStr;
 use std::sync::OnceLock;
-use urlencoding::{decode, encode};
+use urlencoding::decode;
 
 static RATE_LIMITER: OnceLock<RateLimiter> = OnceLock::new();
 
@@ -13,8 +11,9 @@ pub(crate) fn get_rate_limiter() -> &'static RateLimiter {
     RATE_LIMITER.get_or_init(|| RateLimiter::default())
 }
 
+/// Search via yggapi.eu (no Cloudflare, instant).
+/// The wreq client parameter is no longer needed for search.
 pub async fn search(
-    client: &wreq::Client,
     name: &str,
     offset: Option<usize>,
     category: Option<usize>,
@@ -43,24 +42,26 @@ pub async fn search(
 
     let _guard = get_rate_limiter().acquire().await;
 
-    let url = build_query_url(name.as_str(), offset, category, sub_category, sort, order)?;
-    let start = std::time::Instant::now();
-    let body = fetch_ygg_page(client, &url).await?;
+    // Build categories list for yggapi.eu
+    let mut categories = Vec::new();
+    if let Some(cat) = category {
+        categories.push(cat);
+    }
+    if let Some(sub_cat) = sub_category {
+        categories.push(sub_cat);
+    }
 
-    debug!("Search response received");
-    let torrents = parser::extract_torrents(&body)?;
-    let torrents = if let Some(ban_words) = ban_words {
-        torrents
-            .into_iter()
-            .filter(|torrent| {
-                !ban_words
-                    .iter()
-                    .any(|word| torrent.name.to_lowercase().contains(&word.to_lowercase()))
-            })
-            .collect()
-    } else {
-        torrents
-    };
+    let start = std::time::Instant::now();
+    let torrents = crate::yggapi::search(
+        name.as_str(),
+        offset,
+        &categories,
+        sort,
+        order,
+        ban_words.as_deref(),
+    )
+    .await?;
+
     let stop = std::time::Instant::now();
     debug!(
         "Found {} torrents in {:?}",
@@ -86,6 +87,7 @@ pub enum Order {
     Descending,
 }
 impl Sort {
+    #[allow(dead_code)]
     pub fn as_str(&self) -> &str {
         match self {
             Sort::Name => "name",
@@ -99,6 +101,7 @@ impl Sort {
 }
 
 impl Order {
+    #[allow(dead_code)]
     pub fn as_str(&self) -> &str {
         match self {
             Order::Ascending => "asc",
@@ -132,99 +135,5 @@ impl FromStr for Order {
             "desc" => Ok(Order::Descending),
             _ => Err(format!("Ordre invalide : {}", s)),
         }
-    }
-}
-
-fn build_query_url(
-    name: &str,
-    offset: Option<usize>,
-    category: Option<usize>,
-    sub_category: Option<usize>,
-    sort: Option<Sort>,
-    order: Option<Order>,
-) -> Result<String, Box<dyn std::error::Error>> {
-    let domain_lock = DOMAIN.lock()?;
-    let cloned_guard = domain_lock.clone();
-    let domain = cloned_guard.as_str();
-    drop(domain_lock);
-
-    let mut url = format!("https://{domain}/engine/search?name={}", encode(&name));
-    if let Some(offset) = offset {
-        url.push_str(&format!("&page={offset}"));
-    }
-    if let Some(category) = category {
-        if let Some((cat, sub_cat)) = get_category_pair(category) {
-            url.push_str(&format!("&category={}", cat));
-            url.push_str(&format!("&sub_category={}", sub_cat));
-        }
-    }
-    if let Some(sub_category) = sub_category {
-        url.push_str(&format!("&sub_category={sub_category}"));
-    }
-    if let Some(sort) = sort {
-        url.push_str(&format!("&sort={}", sort.as_str()));
-    }
-    if let Some(order) = order {
-        url.push_str(&format!("&order={}", order.as_str()));
-    }
-    url.push_str("&do=search");
-    Ok(url)
-}
-
-fn get_category_pair(category: usize) -> Option<(String, String)> {
-    /*let json_text = include_str!("../categories.json");
-    let categories: serde_json::Value = serde_json::from_str(json_text).ok()?;
-    for cat in categories.as_array()? {
-        if cat.get("id")?.as_str()?.parse::<usize>().ok()? == category {
-            return Some((category.to_string(), "all".to_string()));
-        }
-        if let Some(sub_cats) = cat.get("sub_categories").and_then(|sc| sc.as_array()) {
-            for sub_cat in sub_cats {
-                if sub_cat.get("id")?.as_str()?.parse::<usize>().ok()? == category {
-                    return Some((cat.get("id")?.as_str()?.to_string(), category.to_string()));
-                }
-            }
-        }
-    }*/
-
-    for cat in CATEGORIES_CACHE.get().unwrap().iter() {
-        if cat.id == category {
-            return Some((category.to_string(), "all".to_string()));
-        }
-        for sub_cat in &cat.sub_categories {
-            if sub_cat.id == category {
-                return Some((cat.id.to_string(), category.to_string()));
-            }
-        }
-    }
-
-    None
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::domain::get_ygg_domain;
-
-    #[tokio::test]
-    async fn test_build_query_url() {
-        let domain = get_ygg_domain().await.unwrap_or_else(|_| {
-            error!("Failed to get YGG domain");
-            std::process::exit(1);
-        });
-        let mut domain_lock = DOMAIN.lock().unwrap();
-        *domain_lock = domain.clone();
-        drop(domain_lock);
-
-        let url = build_query_url(
-            "Vaiana",
-            None,
-            None,
-            None,
-            Some(Sort::Name),
-            Some(Order::Ascending),
-        )
-        .unwrap();
-        println!("URL: {}", url);
     }
 }

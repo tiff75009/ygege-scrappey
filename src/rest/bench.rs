@@ -60,7 +60,6 @@ pub async fn bench_mark(
 
             let start = chrono::Utc::now();
             let _search = search(
-                &data.client,
                 "Vaiana",
                 None,
                 None,

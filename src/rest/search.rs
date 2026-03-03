@@ -8,10 +8,8 @@ use futures::future::join_all;
 use qstring::QString;
 use serde_json::Value;
 use std::collections::HashSet;
-use wreq::Client;
 
 async fn batch_best_search(
-    client: &Client,
     queries: Vec<String>,
     offset: Option<usize>,
     category: Option<usize>,
@@ -20,7 +18,6 @@ async fn batch_best_search(
     order: Option<Order>,
     ban_words: Option<Vec<String>>,
     quote_search: bool,
-    config: &Config,
 ) -> Result<Vec<Torrent>, Box<dyn std::error::Error>> {
     debug!("Starting parallel search for {} queries", queries.len());
 
@@ -32,7 +29,6 @@ async fn batch_best_search(
         .iter()
         .map(|query| {
             search(
-                client,
                 query.as_str(),
                 offset,
                 category,
@@ -91,37 +87,12 @@ async fn batch_best_search(
                 }
             }
             Err(e) => {
-                if e.to_string().contains("Session expired") {
-                    info!("Session expired during TMDB search, attempting renewal...");
-                    let new_client = crate::auth::login_with_scrappey(
-                        config.username.as_str(),
-                        config.password.as_str(),
-                        true,
-                        config.scrappey_api_key.as_deref(),
-                    )
-                    .await?;
-
-                    return Box::pin(batch_best_search(
-                        &new_client,
-                        queries,
-                        offset,
-                        category,
-                        sub_category,
-                        sort,
-                        order,
-                        ban_words,
-                        quote_search,
-                        config,
-                    ))
-                    .await;
-                } else {
-                    warn!(
-                        "Search failed for query #{} ({}): {}",
-                        idx + 1,
-                        queries[idx],
-                        e
-                    );
-                }
+                warn!(
+                    "Search failed for query #{} ({}): {}",
+                    idx + 1,
+                    queries[idx],
+                    e
+                );
             }
         }
     }
@@ -141,7 +112,6 @@ async fn batch_best_search(
 }
 
 async fn batch_category_search(
-    client: &Client,
     name: &str,
     offset: Option<usize>,
     cats_list: Vec<usize>,
@@ -150,7 +120,6 @@ async fn batch_category_search(
     order: Option<Order>,
     ban_words: Option<Vec<String>>,
     quote_search: bool,
-    config: &Config,
 ) -> Result<Vec<Torrent>, Box<dyn std::error::Error>> {
     debug!(
         "Starting parallel search across {} categories",
@@ -161,7 +130,6 @@ async fn batch_category_search(
         .iter()
         .map(|cat| {
             search(
-                client,
                 name,
                 offset,
                 Some(*cat),
@@ -191,32 +159,7 @@ async fn batch_category_search(
                 });
             }
             Err(e) => {
-                if e.to_string().contains("Session expired") {
-                    info!("Session expired during category search, attempting renewal...");
-                    let new_client = crate::auth::login_with_scrappey(
-                        config.username.as_str(),
-                        config.password.as_str(),
-                        true,
-                        config.scrappey_api_key.as_deref(),
-                    )
-                    .await?;
-
-                    return Box::pin(batch_category_search(
-                        &new_client,
-                        name,
-                        offset,
-                        cats_list,
-                        sub_category,
-                        sort,
-                        order,
-                        ban_words,
-                        quote_search,
-                        config,
-                    ))
-                    .await;
-                } else {
-                    warn!("Search failed for category {}: {}", cats_list[idx], e);
-                }
+                warn!("Search failed for category {}: {}", cats_list[idx], e);
             }
         }
     }
@@ -250,8 +193,6 @@ pub async fn ygg_search(
     let connarr = qs.get("connarr");
     let quote_search = qs.get("quote_search").map(|s| s == "true").unwrap_or(false);
 
-    debug!("Prowlarr/Jackett detected");
-
     let ban_words = qs.get("ban_words").and_then(|s| {
         let v: Vec<String> = s
             .split(',')
@@ -282,7 +223,35 @@ pub async fn ygg_search(
         }
     }
 
+    // --- TMDB/IMDB search ---
     if config.tmdb_token.is_some() && (qs.get("tmdbid").is_some() || qs.get("imdbid").is_some()) {
+        // Try yggapi.eu native TMDB search first
+        if let Some(tmdb_id_str) = qs.get("tmdbid") {
+            if let Ok(tmdb_id) = tmdb_id_str.parse::<usize>() {
+                let cats: Vec<usize> = category.into_iter().collect();
+                // Try both "movie" and "tv" types via yggapi.eu
+                for media_type in &["movie", "tv"] {
+                    match crate::yggapi::search_by_tmdb(tmdb_id, Some(media_type), &cats, sort, order).await {
+                        Ok(results) if !results.is_empty() => {
+                            info!("{} torrents found via yggapi.eu TMDB search (type={})", results.len(), media_type);
+                            let torrent_json: Vec<Value> = results.into_iter().map(|t| t.to_json()).collect();
+                            let mut response = HttpResponse::Ok();
+                            if let Some(cookies) = data.cookies_header {
+                                response.insert_header(("X-Session-Cookies", cookies));
+                            }
+                            return Ok(response.json(torrent_json));
+                        }
+                        Ok(_) => continue,
+                        Err(e) => {
+                            debug!("yggapi.eu TMDB search failed for type={}: {}", media_type, e);
+                            continue;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Fallback to text-based TMDB/IMDB search
         let db_search = if let Some(id) = qs.get("tmdbid") {
             Some((id, TMDB, "TMDB"))
         } else if let Some(id) = qs.get("imdbid") {
@@ -307,7 +276,6 @@ pub async fn ygg_search(
                         id
                     );
                     let results = batch_best_search(
-                        &data.client,
                         queries,
                         offset,
                         category,
@@ -316,12 +284,11 @@ pub async fn ygg_search(
                         order,
                         ban_words.clone(),
                         quote_search,
-                        &config,
                     )
                     .await?;
 
                     if !results.is_empty() {
-                        info!("{} torrents found via {} search", results.len(), db_name);
+                        info!("{} torrents found via {} text search", results.len(), db_name);
                         let torrent_json: Vec<Value> =
                             results.into_iter().map(|t| t.to_json()).collect();
                         let mut response = HttpResponse::Ok();
@@ -331,7 +298,7 @@ pub async fn ygg_search(
                         return Ok(response.json(torrent_json));
                     }
                     debug!(
-                        "{} search returned no results, falling back to regular search",
+                        "{} search returned no results",
                         db_name
                     );
                     let mut response = HttpResponse::Ok();
@@ -350,7 +317,6 @@ pub async fn ygg_search(
                 }
             }
         } else {
-            warn!("No valid database ID provided for DB search");
             let mut response = HttpResponse::Ok();
             if let Some(cookies) = data.cookies_header {
                 response.insert_header(("X-Session-Cookies", cookies));
@@ -386,7 +352,6 @@ pub async fn ygg_search(
         );
 
         let results = batch_category_search(
-            &data.client,
             name,
             offset,
             cats,
@@ -395,7 +360,6 @@ pub async fn ygg_search(
             order,
             ban_words.clone(),
             quote_search,
-            &config,
         )
         .await?;
 
@@ -408,15 +372,15 @@ pub async fn ygg_search(
         return Ok(response.json(torrent_json));
     }
 
+    // Standard search via yggapi.eu
     let torrents = search(
-        &data.client,
         name,
         offset,
         category,
         sub_category,
         sort,
         order,
-        ban_words.clone(),
+        ban_words,
         quote_search,
     )
     .await;
@@ -432,63 +396,8 @@ pub async fn ygg_search(
             Ok(response.json(json))
         }
         Err(e) => {
-            // If session expired and NOT using custom cookies, try to renew
-            if e.to_string().contains("Session expired") && !data.is_custom {
-                info!("Trying to renew session...");
-                let new_client =
-                    crate::auth::login_with_scrappey(config.username.as_str(), config.password.as_str(), true, config.scrappey_api_key.as_deref())
-                        .await?;
-
-                // Copy cookies from new client to shared client
-                let domain = crate::DOMAIN.lock()?;
-                let url = wreq::Url::parse(&format!("https://{}/", domain))?;
-                if let Some(cookies) = new_client.get_cookies(&url) {
-                    data.shared_client.clear_cookies();
-                    for cookie_str in cookies.to_str().unwrap_or("").split(';') {
-                        let cookie_str = cookie_str.trim();
-                        if cookie_str.is_empty() {
-                            continue;
-                        }
-                        let parts: Vec<&str> = cookie_str.splitn(2, '=').collect();
-                        if parts.len() != 2 {
-                            continue;
-                        }
-                        let cookie =
-                            wreq::cookie::CookieBuilder::new(parts[0].trim(), parts[1].trim())
-                                .domain(domain.as_str())
-                                .path("/")
-                                .http_only(true)
-                                .secure(true)
-                                .build();
-                        data.shared_client.set_cookie(&url, cookie);
-                    }
-                }
-                drop(domain);
-
-                info!("Session renewed, retrying search...");
-                let torrents = search(
-                    &new_client,
-                    name,
-                    offset,
-                    category,
-                    sub_category,
-                    sort,
-                    order,
-                    ban_words,
-                    quote_search,
-                )
-                .await?;
-                let json: Vec<Value> = torrents.into_iter().map(|t| t.to_json()).collect();
-                info!("{} torrents found", json.len());
-                let mut response = HttpResponse::Ok();
-                if let Some(cookies) = data.cookies_header {
-                    response.insert_header(("X-Session-Cookies", cookies));
-                }
-                Ok(response.json(json))
-            } else {
-                error!("Search error: {}", e);
-                Err(e)
-            }
+            error!("Search error: {}", e);
+            Err(e)
         }
     }
 }

@@ -24,7 +24,6 @@ pub async fn status_check(data: MaybeCustomClient, config: web::Data<Config>) ->
     drop(domain_lock);
 
     let search = search(
-        &data.client,
         "Vaiana",
         None,
         None,

@@ -6,6 +6,9 @@ use tokio::sync::RwLock;
 /// Global Scrappey client, initialized if SCRAPPEY_API_KEY is set
 pub static SCRAPPEY: OnceLock<ScrappeyClient> = OnceLock::new();
 
+/// Persistent profile ID for Scrappey (survives across sessions indefinitely)
+pub const PROFILE_ID: &str = "ygg-dl-v2";
+
 /// Global Scrappey session ID (persists cookies across requests)
 static SC_SESSION_ID: OnceLock<RwLock<Option<String>>> = OnceLock::new();
 
@@ -73,6 +76,8 @@ pub struct ScrappeyRawSolution {
     pub cookie_string: String,
     #[serde(rename = "innerText", default)]
     pub inner_text: String,
+    #[serde(rename = "javascriptReturn", default)]
+    pub javascript_return: Vec<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -94,6 +99,7 @@ pub struct ScrappeySolution {
     pub cookies: Vec<ScrappeyCookie>,
     pub user_agent: String,
     pub response: String,
+    pub javascript_return: Vec<serde_json::Value>,
 }
 
 #[derive(Debug, Clone)]
@@ -125,6 +131,7 @@ impl From<ScrappeyRawSolution> for ScrappeySolution {
                 .collect(),
             user_agent: raw.user_agent,
             response: raw.response,
+            javascript_return: raw.javascript_return,
         }
     }
 }
@@ -202,6 +209,12 @@ impl ScrappeyClient {
         lock.clone()
     }
 
+    /// Récupérer la session ID stockée
+    pub async fn get_session_id() -> Option<String> {
+        let lock = get_session_lock().read().await;
+        lock.clone()
+    }
+
     /// Stocker les cookies authentifiés (post-login) pour les réutiliser
     pub async fn set_cookies(cookies: Vec<ScrappeyCookie>) {
         let mut lock = get_cookies_lock().write().await;
@@ -241,36 +254,119 @@ impl ScrappeyClient {
             .map(|s| s.response)
     }
 
-    /// Fetch a page via Scrappey, returning the full solution (with cookies + user-agent)
-    /// Injecte automatiquement les cookies authentifiés via cookiejar
+    /// Fetch a page via Scrappey, returning the full solution (with cookies + user-agent).
+    /// Automatically recreates session if the browser was closed (session expired).
     pub async fn fetch_page_with_solution(
+        url: &str,
+    ) -> Result<ScrappeySolution, Box<dyn std::error::Error>> {
+        match Self::fetch_page_with_solution_inner(url).await {
+            Ok(solution) => Ok(solution),
+            Err(e) if Self::is_session_expired_error(e.as_ref()) => {
+                warn!("Scrappey session expired ({}), recreating session...", e);
+                Self::recreate_session().await?;
+                // Retry with the new session
+                Self::fetch_page_with_solution_inner(url).await
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    async fn fetch_page_with_solution_inner(
         url: &str,
     ) -> Result<ScrappeySolution, Box<dyn std::error::Error>> {
         let sc = SCRAPPEY
             .get()
             .ok_or("Scrappey not configured (set SCRAPPEY_API_KEY)")?;
 
-        // Construire la requête avec cookiejar et User-Agent
+        let request = Self::build_request("request.get", url, None).await;
+
+        sc.raw_request(&request).await
+    }
+
+    /// Build a Scrappey request with profileId, session, cookiejar, and user-agent
+    pub async fn build_request(cmd: &str, url: &str, extra: Option<&serde_json::Value>) -> serde_json::Value {
         let mut request = serde_json::json!({
-            "cmd": "request.get",
-            "url": url
+            "cmd": cmd,
+            "url": url,
+            "profileId": PROFILE_ID,
+            "proxyCountry": "FR"
         });
 
-        // Ajouter le cookiejar si des cookies authentifiés existent
-        if let Some(jar) = Self::build_cookiejar().await {
-            request["cookiejar"] = jar;
-            debug!("Scrappey: injecting {} auth cookies via cookiejar",
-                   request["cookiejar"].as_array().map(|a| a.len()).unwrap_or(0));
+        // Reuse login session (same browser = no new CF challenge)
+        if let Some(session_id) = Self::get_session_id().await {
+            request["session"] = serde_json::Value::String(session_id);
         }
 
-        // Matcher le User-Agent du login CF
+        // Inject auth cookies
+        if let Some(jar) = Self::build_cookiejar().await {
+            debug!("Scrappey: injecting {} auth cookies via cookiejar",
+                   jar.as_array().map(|a| a.len()).unwrap_or(0));
+            request["cookiejar"] = jar;
+        }
+
+        // Match user-agent from login
         if let Some(ua) = Self::get_user_agent().await {
             request["customHeaders"] = serde_json::json!({
                 "user-agent": ua
             });
         }
 
-        sc.raw_request(&request).await
+        // Merge extra fields if provided
+        if let Some(extra) = extra {
+            if let Some(obj) = extra.as_object() {
+                for (k, v) in obj {
+                    request[k] = v.clone();
+                }
+            }
+        }
+
+        request
+    }
+
+    /// Check if an error indicates the Scrappey session/browser has expired
+    fn is_session_expired_error(e: &dyn std::error::Error) -> bool {
+        let msg = e.to_string();
+        msg.contains("browser has been closed")
+            || msg.contains("Target page")
+            || msg.contains("session")
+            || msg.contains("context or browser")
+    }
+
+    /// Recreate a new Scrappey session, preserving cookies and user-agent
+    async fn recreate_session() -> Result<(), Box<dyn std::error::Error>> {
+        let sc = SCRAPPEY
+            .get()
+            .ok_or("Scrappey not configured")?;
+
+        info!("Scrappey: recreating session (previous browser was closed)...");
+        let _session_id = sc.create_session().await?;
+        info!("Scrappey: new session created, cookies will be re-injected via cookiejar");
+        Ok(())
+    }
+
+    /// Execute a raw Scrappey request with automatic session retry on expiration
+    pub async fn raw_request_with_retry(
+        body: &serde_json::Value,
+    ) -> Result<ScrappeySolution, Box<dyn std::error::Error>> {
+        let sc = SCRAPPEY
+            .get()
+            .ok_or("Scrappey not configured")?;
+
+        match sc.raw_request(body).await {
+            Ok(solution) => Ok(solution),
+            Err(e) if Self::is_session_expired_error(e.as_ref()) => {
+                warn!("Scrappey session expired during raw request, recreating...");
+                Self::recreate_session().await?;
+
+                // Rebuild the request with new session ID
+                let mut new_body = body.clone();
+                if let Some(session_id) = Self::get_session_id().await {
+                    new_body["session"] = serde_json::Value::String(session_id);
+                }
+                sc.raw_request(&new_body).await
+            }
+            Err(e) => Err(e),
+        }
     }
 
     /// Send a raw JSON request to Scrappey API (for browserActions, etc.)
@@ -331,69 +427,19 @@ impl ScrappeyClient {
     }
 }
 
-/// Centralized function to fetch a YGG page.
-/// Tries wreq first, falls back to Scrappey (with persistent session) if CF blocks.
+/// Centralized function to fetch a YGG page via Scrappey (with persistent session).
+/// wreq is no longer used for direct YGG access (CF blocks everything).
 pub async fn fetch_ygg_page(
-    client: &wreq::Client,
+    _client: &wreq::Client,
     url: &str,
 ) -> Result<String, Box<dyn std::error::Error>> {
-    // Try wreq first
-    match client.get(url).send().await {
-        Ok(response) => {
-            let status = response.status();
-            if status.is_success() {
-                return response
-                    .text()
-                    .await
-                    .map_err(|e| format!("Failed to read response body: {}", e).into());
-            }
-
-            // CF block — fallback to Scrappey with session
-            if status.as_u16() == 307
-                || status.as_u16() == 302
-                || status.as_u16() == 403
-                || status.as_u16() == 503
-            {
-                warn!(
-                    "wreq blocked by CF (HTTP {}) for {} — falling back to Scrappey",
-                    status, url
-                );
-                if ScrappeyClient::is_available() {
-                    let html = ScrappeyClient::fetch_page(url).await?;
-                    debug!(
-                        "Scrappey fallback returned {} bytes for {}",
-                        html.len(),
-                        url
-                    );
-                    return Ok(html);
-                } else {
-                    return Err(format!(
-                        "CF blocked (HTTP {}) and Scrappey not configured",
-                        status
-                    )
-                    .into());
-                }
-            }
-
-            Err(format!("HTTP error {} for {}", status, url).into())
-        }
-        Err(e) => {
-            warn!(
-                "wreq request failed for {}: {} — trying Scrappey",
-                url, e
-            );
-            if ScrappeyClient::is_available() {
-                let html = ScrappeyClient::fetch_page(url).await?;
-                debug!(
-                    "Scrappey fallback returned {} bytes for {}",
-                    html.len(),
-                    url
-                );
-                return Ok(html);
-            } else {
-                Err(format!("Request failed and Scrappey not configured: {}", e).into())
-            }
-        }
+    if !ScrappeyClient::is_available() {
+        return Err("Scrappey not configured (set SCRAPPEY_API_KEY)".into());
     }
+
+    debug!("Fetching YGG page via Scrappey: {}", url);
+    let html = ScrappeyClient::fetch_page(url).await?;
+    debug!("Scrappey returned {} bytes for {}", html.len(), url);
+    Ok(html)
 }
 

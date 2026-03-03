@@ -11,6 +11,7 @@ mod rest;
 mod search;
 mod user;
 mod utils;
+mod yggapi;
 
 use crate::auth::KEY;
 use crate::categories::init_categories;

@@ -103,6 +103,7 @@ impl Torrent {
     }
 }
 
+#[allow(dead_code)]
 pub fn extract_torrents(body: &str) -> Result<Vec<Torrent>, Box<dyn std::error::Error>> {
     if body.contains("Aucun résultat ") {
         debug!("No torrents found in the response");
@@ -242,8 +243,10 @@ pub fn extract_torrents(body: &str) -> Result<Vec<Torrent>, Box<dyn std::error::
     Ok(torrents)
 }
 
+#[allow(dead_code)]
 const SIZES: [&str; 5] = ["o", "ko", "Mo", "Go", "To"];
 
+#[allow(dead_code)]
 fn human_readable_size_to_bytes(size: &str) -> Result<u64, Box<dyn std::error::Error>> {
     let size = size.trim();
     let mut split_index = 0;
