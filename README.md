@@ -42,6 +42,15 @@ Indexeur haute performance pour YGG Torrent écrit en Rust
 
 ## Installation rapide (Docker)
 
+### Architectures supportées
+
+| Architecture | Plateforme | Exemples |
+|---|---|---|
+| `linux/amd64` | x86_64 | PC, serveur, NAS Synology x86, VPS |
+| `linux/arm64` | ARM 64-bit | Raspberry Pi 4/5, Mac M1/M2/M3/M4, NAS ARM |
+
+Docker sélectionne automatiquement la bonne image selon votre machine.
+
 ### 1. Avec Docker Compose
 
 ```bash
