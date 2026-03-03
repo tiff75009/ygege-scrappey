@@ -1,0 +1,143 @@
+name: Release Binaries
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  linux:
+    name: Build Linux (${{ matrix.target }})
+    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            artifact: ygege-linux-amd64
+            packages: ""
+          - target: aarch64-unknown-linux-gnu
+            artifact: ygege-linux-arm64
+            packages: crossbuild-essential-arm64
+            env:
+              CC: aarch64-linux-gnu-gcc
+              CXX: aarch64-linux-gnu-g++
+              CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-g++
+              CFLAGS_aarch64_unknown_linux_gnu: -D__ARM_ARCH=8
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+          cache: true
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake perl pkg-config libclang-dev
+          if [ -n "${{ matrix.packages }}" ]; then
+            sudo apt-get install -y ${{ matrix.packages }}
+          fi
+
+      - name: Add target
+        run: rustup target add ${{ matrix.target }}
+
+      - name: Build
+        env:
+          BUILD_COMMIT: ${{ github.sha }}
+          BUILD_DATE: ${{ github.event.head_commit.timestamp }}
+          BUILD_BRANCH: ${{ github.ref_name }}
+          CC: ${{ matrix.env.CC || '' }}
+          CXX: ${{ matrix.env.CXX || '' }}
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: ${{ matrix.env.CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER || '' }}
+          CFLAGS_aarch64_unknown_linux_gnu: ${{ matrix.env.CFLAGS_aarch64_unknown_linux_gnu || '' }}
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Upload to release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cp target/${{ matrix.target }}/release/ygege ${{ matrix.artifact }}
+          gh release upload ${{ github.ref_name }} ${{ matrix.artifact }} --clobber
+
+  windows:
+    name: Build Windows
+    runs-on: windows-2025
+    env:
+      RUSTFLAGS: "-C target-feature=+crt-static"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+          cache: true
+
+      - name: Install dependencies
+        shell: cmd
+        run: |
+          choco install cmake -y
+          choco install strawberryperl -y
+          choco install pkgconfiglite -y
+          choco install llvm -y
+          choco install nasm -y
+
+      - name: Build
+        env:
+          BUILD_COMMIT: ${{ github.sha }}
+          BUILD_DATE: ${{ github.event.head_commit.timestamp }}
+          BUILD_BRANCH: ${{ github.ref_name }}
+        run: cargo build --release --target x86_64-pc-windows-msvc
+
+      - name: Upload to release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          Copy-Item "target\x86_64-pc-windows-msvc\release\ygege.exe" "ygege-windows-x86_64.exe"
+          gh release upload ${{ github.ref_name }} ygege-windows-x86_64.exe --clobber
+
+  macos:
+    name: Build macOS (${{ matrix.target }})
+    runs-on: macos-latest
+    strategy:
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            artifact: ygege-macos-arm64
+          - target: x86_64-apple-darwin
+            artifact: ygege-macos-x86_64
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+          cache: true
+
+      - name: Install dependencies
+        run: brew install cmake llvm 2>/dev/null || true
+
+      - name: Add target
+        run: rustup target add ${{ matrix.target }}
+
+      - name: Build
+        env:
+          BUILD_COMMIT: ${{ github.sha }}
+          BUILD_DATE: ${{ github.event.head_commit.timestamp }}
+          BUILD_BRANCH: ${{ github.ref_name }}
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Upload to release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cp target/${{ matrix.target }}/release/ygege ${{ matrix.artifact }}
+          gh release upload ${{ github.ref_name }} ${{ matrix.artifact }} --clobber
