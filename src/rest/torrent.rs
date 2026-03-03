@@ -181,7 +181,7 @@ async fn get_download_token(
 /// If CF cookies are available, uses them directly.
 /// Otherwise tries wreq first, then gets cookies from Scrappey and retries.
 async fn download_torrent_binary(
-    client: &wreq::Client,
+    _client: &wreq::Client,
     url: &str,
     cf_cookies: Option<&str>,
     cf_ua: Option<&str>,

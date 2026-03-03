@@ -55,6 +55,7 @@ pub struct ScrappeyResponse {
 }
 
 #[derive(Debug, Deserialize, Clone)]
+#[allow(dead_code)]
 pub struct ScrappeyRawSolution {
     #[serde(default)]
     pub verified: bool,
@@ -86,6 +87,7 @@ pub struct ScrappeyRawCookie {
 
 /// Unified solution type matching the old FlareSolverr interface
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct ScrappeySolution {
     pub url: String,
     pub status: u16,
