@@ -1,6 +1,6 @@
 use crate::DOMAIN;
 use crate::search::get_rate_limiter;
-use crate::flaresolverr::fetch_ygg_page;
+use crate::scrappey::fetch_ygg_page;
 use scraper::{Html, Selector};
 use serde::Serialize;
 use tokio::sync::OnceCell;

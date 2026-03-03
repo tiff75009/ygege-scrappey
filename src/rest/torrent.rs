@@ -1,7 +1,7 @@
 use crate::DOMAIN;
 use crate::config::Config;
 use crate::rest::client_extractor::MaybeCustomClient;
-use crate::flaresolverr::{FLARESOLVERR, FlareSolverrClient, FlareSolverrCookie};
+use crate::scrappey::{SCRAPPEY, ScrappeyClient, ScrappeyCookie};
 use actix_web::{HttpRequest, HttpResponse, get, web};
 use serde_json::Value;
 use tokio::time::{Duration, sleep};
@@ -26,9 +26,9 @@ pub async fn download_torrent(
 
     debug!("Request download token {} torrent_id={}", token_url, id);
 
-    // --- Step 1: Get CF cookies from FlareSolverr if needed ---
+    // --- Step 1: Get CF cookies from Scrappey if needed ---
     // We need valid CF cookies to make direct wreq requests.
-    // Strategy: try wreq first; if CF blocks, use FlareSolverr to get cookies, then retry wreq.
+    // Strategy: try wreq first; if CF blocks, use Scrappey to get cookies, then retry wreq.
 
     let (token, cf_cookies, cf_ua) = get_download_token(
         &data.client,
@@ -93,7 +93,7 @@ pub async fn download_torrent(
 
 /// Request the download token.
 /// Returns (token, Option<cookies_string>, Option<user_agent>).
-/// If CF blocks wreq, uses FlareSolverr's request.post to make the POST
+/// If CF blocks wreq, uses Scrappey's request.post to make the POST
 /// through a real browser, bypassing CF completely.
 async fn get_download_token(
     client: &wreq::Client,
@@ -119,36 +119,49 @@ async fn get_download_token(
         }
         Ok(response) => {
             let status = response.status();
-            warn!("wreq POST request failed (HTTP {}) for {} — trying FlareSolverr request.post", status, url);
+            warn!("wreq POST request failed (HTTP {}) for {} — trying Scrappey request.post", status, url);
         }
         Err(e) => {
-            warn!("wreq POST request failed for {}: {} — trying FlareSolverr request.post", url, e);
+            warn!("wreq POST request failed for {}: {} — trying Scrappey request.post", url, e);
         }
     }
 
-    // FlareSolverr fallback: use request.post to POST through a real browser
-    if !FlareSolverrClient::is_available() {
-        return Err("CF blocked token request and FlareSolverr not configured".into());
+    // Scrappey fallback: use request.post to POST through a real browser
+    if !ScrappeyClient::is_available() {
+        return Err("CF blocked token request and Scrappey not configured".into());
     }
 
-    let fs = FLARESOLVERR
+    let sc = SCRAPPEY
         .get()
-        .ok_or("FlareSolverr not configured")?;
+        .ok_or("Scrappey not configured")?;
 
-    let session_id = match FlareSolverrClient::get_session_id().await {
-        Some(id) => id,
-        None => {
-            info!("No FlareSolverr session exists, creating one for token POST...");
-            fs.create_session().await?
+    info!("Scrappey: posting to {} via raw_request", url);
+
+    let mut request = serde_json::json!({
+        "cmd": "request.post",
+        "url": url,
+        "postData": post_data,
+        "customHeaders": {
+            "content-type": "application/x-www-form-urlencoded",
+            "x-requested-with": "XMLHttpRequest"
         }
-    };
+    });
 
-    info!("FlareSolverr: posting to {} via request.post", url);
-    let solution = fs
-        .solve_post(url, post_data, None, 60000, Some(&session_id))
+    // Injecter les cookies authentifiés
+    if let Some(jar) = ScrappeyClient::build_cookiejar().await {
+        request["cookiejar"] = jar;
+    }
+    if let Some(ua) = ScrappeyClient::get_user_agent().await {
+        if let Some(headers) = request["customHeaders"].as_object_mut() {
+            headers.insert("user-agent".to_string(), serde_json::Value::String(ua));
+        }
+    }
+
+    let solution = sc
+        .raw_request(&request)
         .await?;
 
-    // Extract token from the FlareSolverr response (HTML body containing JSON)
+    // Extract token from the Scrappey response (HTML body containing JSON)
     let token = extract_token_from_json(&solution.response)?;
 
     // Build cookie header from the solution for subsequent wreq requests (binary download)
@@ -159,14 +172,14 @@ async fn get_download_token(
         .unwrap_or("www.yggtorrent.org");
     let cookie_header = build_cookie_header(&solution.cookies, domain);
 
-    debug!("FlareSolverr request.post succeeded, got token and {} cookies", solution.cookies.len());
+    debug!("Scrappey request.post succeeded, got token and {} cookies", solution.cookies.len());
 
     Ok((token, Some(cookie_header), Some(solution.user_agent.clone())))
 }
 
 /// Download the torrent binary file using wreq.
 /// If CF cookies are available, uses them directly.
-/// Otherwise tries wreq first, then gets cookies from FlareSolverr and retries.
+/// Otherwise tries wreq first, then gets cookies from Scrappey and retries.
 async fn download_torrent_binary(
     client: &wreq::Client,
     url: &str,
@@ -185,7 +198,7 @@ async fn download_torrent_binary(
     headers.insert("Referer", format!("https://{}/", domain).parse().unwrap());
 
     // Try to download using a basic wreq client (without JA3 TLS emulation)
-    // Cloudflare blocks requests where the User-Agent (from FlareSolverr) doesn't
+    // Cloudflare blocks requests where the User-Agent (from Scrappey) doesn't
     // match the JA3 TLS fingerprint (Chrome132 forced by the shared wreq client).
     // Using a plain client avoids this mismatch.
     let basic_client = wreq::Client::builder()
@@ -231,20 +244,20 @@ async fn download_torrent_binary(
         }
     }
 
-    // FlareSolverr fallback: use request.get through a real browser
-    warn!("wreq download failed, trying FlareSolverr GET fallback for {}", url);
-    if !FlareSolverrClient::is_available() {
-        return Err("Torrent download failed and FlareSolverr not configured".into());
+    // Scrappey fallback: use request.get through a real browser
+    warn!("wreq download failed, trying Scrappey GET fallback for {}", url);
+    if !ScrappeyClient::is_available() {
+        return Err("Torrent download failed and Scrappey not configured".into());
     }
 
-    let solution = FlareSolverrClient::fetch_page_with_solution(url).await?;
+    let solution = ScrappeyClient::fetch_page_with_solution(url).await?;
     let body = &solution.response;
 
     // Try base64 decode first (binary responses may be encoded)
     use base64::{Engine as _, engine::general_purpose};
     if let Ok(bytes) = general_purpose::STANDARD.decode(body) {
         if !bytes.is_empty() {
-            info!("FlareSolverr: decoded torrent binary from base64 ({} bytes)", bytes.len());
+            info!("Scrappey: decoded torrent binary from base64 ({} bytes)", bytes.len());
             return Ok(bytes);
         }
     }
@@ -252,13 +265,13 @@ async fn download_torrent_binary(
     // Otherwise treat the response as raw bytes
     let bytes = body.as_bytes().to_vec();
     if bytes.is_empty() {
-        return Err("FlareSolverr returned empty response for torrent download".into());
+        return Err("Scrappey returned empty response for torrent download".into());
     }
-    info!("FlareSolverr: using raw response as torrent binary ({} bytes)", bytes.len());
+    info!("Scrappey: using raw response as torrent binary ({} bytes)", bytes.len());
     Ok(bytes)
 }
 
-/// Extract token from JSON response (handles both plain JSON and HTML-wrapped JSON from FlareSolverr)
+/// Extract token from JSON response (handles both plain JSON and HTML-wrapped JSON from Scrappey)
 fn extract_token_from_json(raw: &str) -> Result<String, Box<dyn std::error::Error>> {
     let json_str = if raw.contains('{') && raw.contains('}') {
         let start = raw.find('{').unwrap();
@@ -277,8 +290,8 @@ fn extract_token_from_json(raw: &str) -> Result<String, Box<dyn std::error::Erro
         .ok_or_else(|| "Token not found in start_download_timer response".into())
 }
 
-/// Build a Cookie header string from FlareSolverr cookies, filtering to the target domain
-fn build_cookie_header(cookies: &[FlareSolverrCookie], domain: &str) -> String {
+/// Build a Cookie header string from Scrappey cookies, filtering to the target domain
+fn build_cookie_header(cookies: &[ScrappeyCookie], domain: &str) -> String {
     cookies
         .iter()
         .filter(|c| domain.contains(c.domain.trim_start_matches('.')))

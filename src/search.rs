@@ -1,7 +1,7 @@
 pub(crate) use crate::categories::CATEGORIES_CACHE;
 use crate::parser::Torrent;
 use crate::rate_limiter::RateLimiter;
-use crate::flaresolverr::fetch_ygg_page;
+use crate::scrappey::fetch_ygg_page;
 use crate::{DOMAIN, parser};
 use std::str::FromStr;
 use std::sync::OnceLock;

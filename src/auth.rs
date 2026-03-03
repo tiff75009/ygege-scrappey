@@ -1,5 +1,5 @@
 use crate::domain::get_leaked_ip;
-use crate::flaresolverr::FlareSolverrClient;
+use crate::scrappey::ScrappeyClient;
 use crate::resolver::AsyncDNSResolverAdapter;
 use crate::{DOMAIN, LOGIN_PAGE, LOGIN_PROCESS_PAGE};
 use std::fs::File;
@@ -19,14 +19,14 @@ pub async fn login(
     password: &str,
     use_sessions: bool,
 ) -> Result<Client, Box<dyn std::error::Error>> {
-    login_with_flaresolverr(username, password, use_sessions, None).await
+    login_with_scrappey(username, password, use_sessions, None).await
 }
 
-pub async fn login_with_flaresolverr(
+pub async fn login_with_scrappey(
     username: &str,
     password: &str,
     use_sessions: bool,
-    flaresolverr_url: Option<&str>,
+    scrappey_api_key: Option<&str>,
 ) -> Result<Client, Box<dyn std::error::Error>> {
     debug!("Logging in with username: {}", username);
 
@@ -151,8 +151,8 @@ pub async fn login_with_flaresolverr(
         .send()
         .await;
 
-    // Déterminer si on a besoin de FlareSolverr
-    let needs_flaresolverr = match &response {
+    // Déterminer si on a besoin de Scrappey
+    let needs_scrappey = match &response {
         Ok(resp) => {
             if !resp.status().is_success() {
                 warn!(
@@ -165,7 +165,7 @@ pub async fn login_with_flaresolverr(
             }
         }
         Err(e) => {
-            warn!("Login page request failed: {} — will try FlareSolverr", e);
+            warn!("Login page request failed: {} — will try Scrappey", e);
             true
         }
     };
@@ -181,66 +181,102 @@ pub async fn login_with_flaresolverr(
         false
     };
 
-    // --- Étape 2 : FlareSolverr fallback si nécessaire ---
+    // --- Étape 2 : Scrappey fallback si nécessaire ---
     // NOTE: Les cookies CF (cf_clearance) sont liés au fingerprint TLS du navigateur
-    // qui les a obtenus. On ne peut PAS les transférer de FlareSolverr vers wreq.
-    // Donc si wreq est bloqué, FlareSolverr doit faire le login COMPLET (GET + POST).
-    if needs_flaresolverr || !has_ygg_cookie {
-        if let Some(fs_url) = flaresolverr_url {
+    // qui les a obtenus. On ne peut PAS les transférer de Scrappey vers wreq.
+    // Donc si wreq est bloqué, Scrappey doit faire le login COMPLET (GET + POST).
+    if needs_scrappey || !has_ygg_cookie {
+        if let Some(api_key) = scrappey_api_key {
             warn!(
-                "Cloudflare challenge detected (needs_flaresolverr={}, has_ygg_cookie={}), \
-                 FlareSolverr will handle the full login at {}...",
-                needs_flaresolverr, has_ygg_cookie, fs_url
+                "Cloudflare challenge detected (needs_scrappey={}, has_ygg_cookie={}), \
+                 Scrappey will handle the full login...",
+                needs_scrappey, has_ygg_cookie
             );
 
-            let fs_client = FlareSolverrClient::new(fs_url)
-                .map_err(|e| format!("Failed to create FlareSolverr client: {}", e))?;
+            let sc_client = ScrappeyClient::new(api_key)
+                .map_err(|e| format!("Failed to create Scrappey client: {}", e))?;
 
-            // Créer une session FlareSolverr persistante (les cookies survient entre requêtes)
-            let session_id = fs_client
+            // Créer une session Scrappey persistante (les cookies survivent entre requêtes)
+            let session_id = sc_client
                 .create_session()
                 .await
-                .map_err(|e| format!("Failed to create FlareSolverr session: {}", e))?;
+                .map_err(|e| format!("Failed to create Scrappey session: {}", e))?;
 
-            // Étape 2a : FlareSolverr GET la page de login (avec session)
-            let get_solution = fs_client
-                .solve_with_session(&login_page_url, 60000, Some(&session_id))
+            // Étape unique : GET login + browserActions (type + enter) en after_captcha
+            // - Scrappey navigue vers la page de login
+            // - Résout automatiquement le challenge CF / Turnstile
+            // - APRÈS résolution, remplit le formulaire avec type (simulation humaine)
+            // - Soumet avec Enter (déclenche les event handlers natifs)
+            // - Attend que la page se stabilise (networkidle)
+            info!("Scrappey: login complet via browserActions (after_captcha)...");
+
+            let login_request = serde_json::json!({
+                "cmd": "request.get",
+                "url": login_page_url,
+                "session": session_id,
+                "browserActions": [
+                    {
+                        "type": "type",
+                        "cssSelector": "input[name='id']",
+                        "text": username,
+                        "when": "after_captcha"
+                    },
+                    {
+                        "type": "type",
+                        "cssSelector": "input[name='pass']",
+                        "text": password,
+                        "when": "after_captcha"
+                    },
+                    {
+                        "type": "keyboard",
+                        "value": "enter",
+                        "when": "after_captcha"
+                    },
+                    {
+                        "type": "wait",
+                        "wait": 5000,
+                        "when": "after_captcha"
+                    },
+                    {
+                        "type": "wait_for_load_state",
+                        "waitForLoadState": "networkidle",
+                        "when": "after_captcha"
+                    }
+                ]
+            });
+
+            let login_solution = sc_client.raw_request(&login_request)
                 .await
-                .map_err(|e| format!("FlareSolverr GET login page failed: {}", e))?;
+                .map_err(|e| format!("Scrappey browser login failed: {}", e))?;
 
             info!(
-                "FlareSolverr solved CF challenge! Got {} cookies",
-                get_solution.cookies.len()
+                "Scrappey login: final URL={}, cookies={}, response_len={}",
+                &login_solution.url[..login_solution.url.len().min(80)],
+                login_solution.cookies.len(),
+                login_solution.response.len()
             );
-            for cookie in &get_solution.cookies {
-                debug!("  Cookie from GET: {}={}", cookie.name, cookie.value);
+            for cookie in &login_solution.cookies {
+                debug!("  Cookie: {}={}", cookie.name, &cookie.value[..cookie.value.len().min(40)]);
             }
 
-            // Étape 2b : FlareSolverr POST les credentials (même session = cookies persistent)
-            let post_url = format!("https://{domain}{LOGIN_PROCESS_PAGE}");
-            let post_data = format!("id={}&pass={}", urlencoding::encode(username), urlencoding::encode(password));
+            // Vérifier si le login a réussi : l'URL finale doit être la homepage, pas /auth/login
+            if login_solution.url.contains("/auth/login") {
+                return Err(
+                    "Login Scrappey échoué : toujours sur /auth/login après soumission. \
+                     Vérifiez les identifiants YGG."
+                        .into(),
+                );
+            }
 
-            info!("FlareSolverr: POSTing credentials to {}...", post_url);
-            let post_solution = fs_client
-                .solve_post(&post_url, &post_data, None, 60000, Some(&session_id))
-                .await
-                .map_err(|e| format!("FlareSolverr POST login failed: {}", e))?;
+            // Les cookies du browserActions contiennent l'état authentifié
+            // Pas besoin de faire un GET supplémentaire (qui créerait un nouveau contexte)
+            let final_cookies = &login_solution.cookies;
+            ScrappeyClient::set_user_agent(login_solution.user_agent.clone()).await;
+            // Stocker les cookies pour les injecter dans les futures requêtes Scrappey
+            ScrappeyClient::set_cookies(final_cookies.clone()).await;
 
-            info!(
-                "FlareSolverr login POST completed! Status: {}, got {} cookies",
-                post_solution.status,
-                post_solution.cookies.len()
-            );
-
-            // Store the User-Agent used by FlareSolverr to solve the CF challenge
-            // This is required because wreq needs to send the EXACT same User-Agent
-            // when using the cf_clearance cookie to download binary torrents.
-            FlareSolverrClient::set_user_agent(post_solution.user_agent.clone()).await;
-
-            // Injecter TOUS les cookies du POST dans le client wreq
-            // Ces cookies incluent les cookies de session YGG (pas juste cf_clearance)
             let base_url = Url::parse(&format!("https://{domain}/"))?;
-            for cookie in &post_solution.cookies {
+            for cookie in final_cookies {
                 debug!(
                     "Injecting session cookie: {}={} (domain: {})",
                     cookie.name, cookie.value, cookie.domain
@@ -259,30 +295,29 @@ pub async fn login_with_flaresolverr(
 
             let stop = std::time::Instant::now();
             info!(
-                "Logged in successfully via FlareSolverr in {:?}",
+                "Logged in successfully via Scrappey in {:?}",
                 stop.duration_since(start)
             );
 
-            // Sauvegarder la session
             if use_sessions {
                 save_session(username, &client).await?;
             }
 
             return Ok(client);
         } else {
-            // Pas de FlareSolverr configuré
-            if needs_flaresolverr {
+            // Pas de Scrappey configuré
+            if needs_scrappey {
                 return Err(
-                    "Cloudflare blocked the login page and FLARESOLVERR_URL is not set. \
-                     Set FLARESOLVERR_URL to enable automatic bypass."
+                    "Cloudflare blocked the login page and SCRAPPEY_API_KEY is not set. \
+                     Set SCRAPPEY_API_KEY to enable automatic bypass."
                         .into(),
                 );
             } else {
-                return Err("No ygg_ cookie found and FLARESOLVERR_URL is not set".into());
+                return Err("No ygg_ cookie found and SCRAPPEY_API_KEY is not set".into());
             }
         }
     } else {
-        debug!("Login page fetched successfully with ygg_ cookie via wreq (no FlareSolverr needed)");
+        debug!("Login page fetched successfully with ygg_ cookie via wreq (no Scrappey needed)");
     }
 
     // --- Étape 3 (wreq only) : POST credentials ---

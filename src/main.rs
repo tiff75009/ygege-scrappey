@@ -3,7 +3,7 @@ mod categories;
 mod config;
 mod dbs;
 mod domain;
-mod flaresolverr;
+mod scrappey;
 mod parser;
 mod rate_limiter;
 pub mod resolver;
@@ -123,20 +123,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     std::fs::create_dir_all("sessions")?;
 
-    if let Some(ref fs_url) = config.flaresolverr_url {
-        match crate::flaresolverr::FlareSolverrClient::init_global(fs_url) {
-            Ok(()) => info!("FlareSolverr initialized at: {}", fs_url),
-            Err(e) => warn!("Failed to initialize FlareSolverr: {}", e),
+    if let Some(ref api_key) = config.scrappey_api_key {
+        match crate::scrappey::ScrappeyClient::init_global(api_key) {
+            Ok(()) => info!("Scrappey initialized (API key: {}...)", &api_key[..api_key.len().min(8)]),
+            Err(e) => warn!("Failed to initialize Scrappey: {}", e),
         }
     } else {
-        info!("FlareSolverr not configured (set FLARESOLVERR_URL to enable CF fallback)");
+        info!("Scrappey not configured (set SCRAPPEY_API_KEY to enable CF fallback)");
     }
 
-    let client = auth::login_with_flaresolverr(
+    let client = auth::login_with_scrappey(
         config.username.as_str(),
         config.password.as_str(),
         true,
-        config.flaresolverr_url.as_deref(),
+        config.scrappey_api_key.as_deref(),
     )
     .await?;
     info!("Logged in to YGG with username: {}", config.username);

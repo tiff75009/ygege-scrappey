@@ -1,5 +1,5 @@
 use crate::DOMAIN;
-use crate::flaresolverr::fetch_ygg_page;
+use crate::scrappey::fetch_ygg_page;
 
 pub async fn get_remaining_downloads(
     client: &wreq::Client,

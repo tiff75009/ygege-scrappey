@@ -1,5 +1,5 @@
 use crate::DOMAIN;
-use crate::flaresolverr::fetch_ygg_page;
+use crate::scrappey::fetch_ygg_page;
 use serde::Serialize;
 
 #[derive(Debug, Default, Serialize)]
