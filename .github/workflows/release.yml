@@ -11,8 +11,19 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  create-release:
+    name: Create GitHub Release
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release create ${{ github.ref_name }} --title "Release ${{ github.ref_name }}" --generate-notes --draft=false
+
   linux:
     name: Build Linux (${{ matrix.target }})
+    needs: create-release
     runs-on: ubuntu-24.04
     strategy:
       matrix:
@@ -68,6 +79,7 @@ jobs:
 
   windows:
     name: Build Windows
+    needs: create-release
     runs-on: windows-2025
     env:
       RUSTFLAGS: "-C target-feature=+crt-static"
@@ -105,6 +117,7 @@ jobs:
 
   macos:
     name: Build macOS (${{ matrix.target }})
+    needs: create-release
     runs-on: macos-latest
     strategy:
       matrix:
