@@ -6,14 +6,11 @@ Indexeur haute performance pour YGG Torrent écrit en Rust
 
 ## [AVERTISSEMENT LÉGAL](DISCLAIMER-fr.md)
 
-
-> **🤖 Fork "Vibe Code" — Intégration FlareSolverr**
+> **Fork Scrappey** — Remplacement de FlareSolverr par [Scrappey](https://scrappey.com)
 >
-> Ce fork a été modifié par **vibe coding** (assisté par IA) pour intégrer [FlareSolverr](https://github.com/FlareSolverr/FlareSolverr) comme **mécanisme de fallback** contre les challenges Cloudflare.
+> Ce fork remplace l'intégration FlareSolverr par **Scrappey**, un service cloud de bypass Cloudflare plus fiable et sans infrastructure à maintenir (pas de conteneur headless Chrome).
 >
-> Quand `wreq` seul n'arrive plus à passer le challenge CF (erreur 403, pas de cookie `ygg_`), ygege délègue automatiquement la résolution à un conteneur FlareSolverr, récupère les cookies de bypass, et les réinjecte dans le client `wreq` pour poursuivre le login normalement.
->
-> **Fichiers modifiés :** `src/flaresolverr.rs` *(nouveau)*, `src/config.rs`, `src/auth.rs`, `src/main.rs`, `docker/compose.yml`
+> Basé sur [UwUDev/ygege](https://github.com/UwUDev/ygege) (fork intermédiaire : [Obijc/ygege](https://github.com/Obijc/ygege)).
 
 ---
 
@@ -21,66 +18,62 @@ Indexeur haute performance pour YGG Torrent écrit en Rust
 
 - ⚡ Recherche quasi instantanée
 - 🔒 Bypass Cloudflare automatisé via émulation TLS/HTTP2 ([wreq](https://crates.io/crates/wreq))
-- 🛡️ **Fallback FlareSolverr** optionnel si le bypass `wreq` échoue *(nouveau)*
+- 🛡️ **Fallback Scrappey** automatique si le bypass `wreq` échoue
 - 🔄 Résolution automatique du domaine actuel de YGG Torrent
 - 🔁 Reconnexion transparente aux sessions expirées + cache de sessions
 - 🌐 Contournement des DNS menteurs (fallback Cloudflare DNS)
 - 💾 Consommation mémoire faible (~15 Mo en release sur Linux)
 - 🔍 Recherche modulaire (nom, seed, leech, commentaires, date, etc.)
-- 📦 Aucune dépendance externe, aucun driver de navigateur
+- 📦 Aucune dépendance externe locale, aucun driver de navigateur
 
 ---
 
-### 1. Utiliser l'image Docker (GHCR)
+## Différences avec le projet original
 
-L'image officielle est disponible sur le GitHub Container Registry :
+| | [UwUDev/ygege](https://github.com/UwUDev/ygege) | Ce fork |
+|---|---|---|
+| Bypass CF primaire | `wreq` (émulation TLS Chrome 132) | Identique |
+| Bypass CF fallback | Aucun | **Scrappey** (cloud) |
+| Login sous CF | Échoue si challenge CF actif | **browserActions** : résolution automatique du challenge puis login |
+| Infrastructure | Aucune | Aucune (Scrappey = SaaS) |
+| Cookies auth | Non persistés entre requêtes | **Cookiejar** : injection automatique dans chaque requête Scrappey |
+
+---
+
+## Installation rapide (Docker)
+
+### 1. Avec Docker Compose
 
 ```bash
-docker pull ghcr.io/obijc/ygege:latest
+git clone https://github.com/tiff75009/ygege-scrappey.git
+cd ygege-scrappey/docker
 ```
 
-*Note : Pour compiler l'image vous-même, consultez le **[Guide Docker complet](docs/build-docker-linux.md)**.*
-
-### 2. Configurer et lancer
-
-Éditez `docker/compose.yml` pour renseigner vos identifiants YGG et optionnellement activer FlareSolverr :
+Éditez `compose.yml` avec vos identifiants :
 
 ```yaml
 services:
   ygege:
-    image: ghcr.io/obijc/ygege:latest
+    image: ghcr.io/tiff75009/ygege-scrappey:latest
     environment:
       YGG_USERNAME: "votre_username"
       YGG_PASSWORD: "votre_password"
-      # FLARESOLVERR_URL: "http://flaresolverr:8191"   # Décommenter pour activer
-
-  # Décommenter le bloc ci-dessous pour activer FlareSolverr :
-  # flaresolverr:
-  #   image: ghcr.io/flaresolverr/flaresolverr:latest
-  #   ports:
-  #     - "8191:8191"
+      SCRAPPEY_API_KEY: "votre_clé_scrappey"  # Obtenir sur https://scrappey.com
+    ports:
+      - "8715:8715"
 ```
 
 ```bash
-cd docker
 docker compose up -d
 ```
 
----
+### 2. Obtenir une clé API Scrappey
 
-## Intégration FlareSolverr (fallback Cloudflare)
+1. Créez un compte sur [scrappey.com](https://scrappey.com)
+2. Ajoutez du crédit (à partir de ~2€, soit ~10 000 requêtes)
+3. Copiez votre clé API dans `SCRAPPEY_API_KEY`
 
-FlareSolverr est un service qui résout les challenges Cloudflare via un vrai navigateur headless. Ygege l'utilise **uniquement en fallback** : si le bypass `wreq` classique échoue, ygege envoie une requête à FlareSolverr, récupère les cookies de résolution, les injecte dans son client HTTP, et reprend le flow normal.
-
-### Activer FlareSolverr
-
-1. Dans `docker/compose.yml`, décommentez le service `flaresolverr`
-2. Décommentez la ligne `FLARESOLVERR_URL` dans les env vars de `ygege`
-3. Relancez : `docker compose up -d`
-
-| Variable d'environnement | Description | Exemple |
-|---|---|---|
-| `FLARESOLVERR_URL` | URL du service FlareSolverr (optionnel) | `http://flaresolverr:8191` |
+> **Coût** : ~0.0002€ par requête. Le fallback Scrappey n'est utilisé que lorsque `wreq` est bloqué par Cloudflare. En fonctionnement normal, la majorité des requêtes passent via `wreq` (gratuit).
 
 ---
 
@@ -90,13 +83,55 @@ FlareSolverr est un service qui résout les challenges Cloudflare via un vrai na
 |---|---|---|
 | `YGG_USERNAME` | Identifiant YGG *(obligatoire)* | — |
 | `YGG_PASSWORD` | Mot de passe YGG *(obligatoire)* | — |
+| `SCRAPPEY_API_KEY` | Clé API Scrappey *(recommandé)* | — |
 | `BIND_IP` | IP d'écoute | `0.0.0.0` |
 | `BIND_PORT` | Port d'écoute | `8715` |
 | `LOG_LEVEL` | Niveau de log (`off`, `error`, `warn`, `info`, `debug`, `trace`) | `debug` |
 | `TMDB_TOKEN` | Token API TMDB (optionnel, pour recherche TMDB/IMDB) | — |
 | `YGG_DOMAIN` | Forcer un domaine YGG spécifique | auto-détecté |
-| `TURBO_ENABLED` | Mode turbo | `false` |
-| `FLARESOLVERR_URL` | URL FlareSolverr (optionnel) | — |
+| `TURBO_ENABLED` | Mode turbo (réduit le timer de téléchargement) | `false` |
+
+---
+
+## Comment ça marche
+
+### Bypass Cloudflare
+
+1. **Cookie magique** : Ygege injecte `account_created=true` pour tenter de désactiver le challenge CF initial
+2. **Émulation TLS/HTTP2** : Via [wreq](https://crates.io/crates/wreq), reproduction fidèle du fingerprint Chrome 132
+3. **Fallback Scrappey** : Si `wreq` est bloqué (HTTP 307/302/403/503), Scrappey prend le relais via un vrai navigateur cloud
+
+### Login avec Scrappey
+
+Quand Cloudflare bloque la page de login :
+1. Scrappey ouvre la page de login dans un navigateur réel
+2. Résout automatiquement le challenge CF / Turnstile
+3. **Après résolution** (`after_captcha`), remplit le formulaire avec simulation de frappe humaine
+4. Soumet avec Enter et attend la stabilisation réseau (`networkidle`)
+5. Les cookies authentifiés sont stockés globalement et injectés via `cookiejar` dans toutes les requêtes suivantes
+
+### Architecture des requêtes
+
+```
+Requête HTTP
+    │
+    ├─► wreq (émulation TLS Chrome 132)
+    │       │
+    │       ├─► Succès → Réponse directe
+    │       │
+    │       └─► Bloqué par CF (307/302/403/503)
+    │               │
+    │               └─► Scrappey (navigateur cloud)
+    │                       │
+    │                       ├─► cookiejar (cookies auth injectés)
+    │                       ├─► User-Agent (matching login CF)
+    │                       └─► Réponse via navigateur réel
+    │
+    └─► Réponse finale
+```
+
+> [!WARNING]
+> L'émulation `wreq` ne fonctionne plus à partir de Chrome 133+ (HTTP/3). Scrappey assure la continuité du service.
 
 ---
 
@@ -115,35 +150,29 @@ Copiez `ygege.yml` dans `{appdata jackett}/cardigann/definitions/`, puis redéma
 
 ---
 
-## Contournement Cloudflare — Comment ça marche
+## Compilation locale
 
-1. **Cookie magique** : Ygege injecte `account_created=true` pour désactiver le challenge CF initial
-2. **Émulation TLS/HTTP2** : Via [wreq](https://crates.io/crates/wreq), reproduction fidèle du fingerprint Chrome 132
-3. **Fallback FlareSolverr** *(nouveau)* : Si le cookie `ygg_` n'est pas obtenu, FlareSolverr résout le challenge via un vrai navigateur headless
-
-> [!WARNING]
-> L'émulation `wreq` ne fonctionne plus à partir de Chrome 133+ (HTTP/3). C'est la raison d'être de l'intégration FlareSolverr.
-
-Articles recommandés :
-- [TLS Fingerprinting](https://fingerprint.com/blog/what-is-tls-fingerprinting-transport-layer-security/)
-- [HTTP/2 Fingerprinting](https://www.trickster.dev/post/understanding-http2-fingerprinting/)
-
----
-
-## Prérequis pour la compilation locale
+### Prérequis
 
 - Rust 1.85.0+
 - OpenSSL 3+
 - Dépendances de [wreq](https://crates.io/crates/wreq)
 
-Ou utilisez simplement Docker : voir le [Guide Docker](docs/build-docker-linux.md).
+```bash
+cargo build --release
+```
+
+Ou utilisez Docker : voir le [Guide Docker](docs/build-docker-linux.md).
 
 ---
 
-## Documentation
+## Crédits
 
-- [Guide Docker complet (compilation + utilisation)](docs/build-docker-linux.md)
-- [Configuration](https://ygege.lila.ws/configuration)
-- [API](https://ygege.lila.ws/api)
-- [FAQ](https://ygege.lila.ws/faq)
-- [Guide de contribution](docs/contribution-fr.md)
+- **[UwUDev/ygege](https://github.com/UwUDev/ygege)** — Projet original
+- **[Obijc/ygege](https://github.com/Obijc/ygege)** — Fork intermédiaire (intégration FlareSolverr)
+- **[Scrappey](https://scrappey.com)** — Service de bypass Cloudflare
+- **[wreq](https://crates.io/crates/wreq)** — Client HTTP avec émulation TLS
+
+## Licence
+
+Identique au projet original.
